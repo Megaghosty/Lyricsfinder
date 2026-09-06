@@ -7,7 +7,7 @@ import json
 import os
 import customtkinter as ctk
 from bs4 import BeautifulSoup
-from deep_translator import GoogleTranslator
+import translators as ts
 
 from winrt.windows.media.control import (
     GlobalSystemMediaTransportControlsSessionManager as MediaManager,
@@ -23,6 +23,7 @@ TRAD_INACTIVE = "#3f3f46"
 TRAD_ACTIVE = "#60a5fa"
 
 CACHE_FILE = "lyrics_cache.json"
+MAX_CACHE_SONGS = 50
 
 def load_cache():
     if os.path.exists(CACHE_FILE):
@@ -35,6 +36,11 @@ def load_cache():
 
 def save_cache(cache_data):
     try:
+        if len(cache_data) > MAX_CACHE_SONGS:
+            keys_to_remove = list(cache_data.keys())[:-MAX_CACHE_SONGS]
+            for k in keys_to_remove:
+                del cache_data[k]
+                
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(cache_data, f, ensure_ascii=False, indent=2)
     except:
@@ -55,12 +61,11 @@ def parse_lrc(lrc_text: str):
 
 def clean_meta(text: str) -> str:
     if not text: return ""
-    text = re.sub(r"\(.*?(clip|video|audio|remaster|live|version|lyrics).*?\)", "", text, flags=re.I)
-    text = re.sub(r"\[.*?(clip|video|audio|remaster|live|version|lyrics).*?\]", "", text, flags=re.I)
-    return re.split(r" - | feat| ft\.", text, flags=re.I)[0].strip()
+    text = re.sub(r"[\(\[].*?(clip|video|audio|remaster|live|version|lyrics|official|hd).*?[\)\]]", "", text, flags=re.I)
+    text = re.split(r"(?i)\s+feat\.|\s+ft\.", text)[0]
+    return text.strip()
 
 def fetch_genius_lyrics(title: str, artist: str):
-    """Scrape silencieusement Genius si Lrclib échoue."""
     try:
         query = f"{artist} {title}".strip()
         search_url = f"https://genius.com/api/search/multi?per_page=1&q={requests.utils.quote(query)}"
@@ -85,11 +90,11 @@ def fetch_genius_lyrics(title: str, artist: str):
     except:
         return None
 
-class DeluxeLyricsApp(ctk.CTk):
+class UltimateLyricsApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Karaoké Deluxe")
+        self.title("Karaoké Ultime")
         self.geometry("600x850")
         self.configure(fg_color=BG_COLOR)
         self.attributes("-topmost", True)
@@ -97,12 +102,9 @@ class DeluxeLyricsApp(ctk.CTk):
 
         self.cache = load_cache()
         self.target_lang = "fr"
-        self.translator = GoogleTranslator(source="auto", target=self.target_lang)
 
         self.current_title = ""
         self.current_artist = ""
-        
-        # Override manuel
         self.winrt_title_ref = ""
         self.manual_override = False
 
@@ -112,13 +114,12 @@ class DeluxeLyricsApp(ctk.CTk):
         self.is_synced = False
         self.is_mini_mode = False
         
-        self.sync_offset = 0.0 # Décalage en secondes
+        self.sync_offset = 0.0
 
         self._build_ui()
         threading.Thread(target=self._media_loop, daemon=True).start()
 
     def _build_ui(self):
-        # --- En-tête ---
         self.header_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.header_frame.pack(fill="x", padx=25, pady=(25, 5))
 
@@ -139,14 +140,12 @@ class DeluxeLyricsApp(ctk.CTk):
         self.lbl_artist = ctk.CTkLabel(self.header_frame, text="Lancez une musique...", font=ctk.CTkFont(family="Segoe UI", size=16), text_color="#a1a1aa", anchor="w")
         self.lbl_artist.pack(fill="x")
 
-        # --- Contrôles (Offset, Langue, Toggles) ---
         self.ctrl_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.ctrl_frame.pack(fill="x", padx=25, pady=(0, 15))
         
         self.lbl_status = ctk.CTkLabel(self.ctrl_frame, text="", font=ctk.CTkFont(size=11, slant="italic"), text_color="#3B8ED0")
         self.lbl_status.pack(side="left")
 
-        # Toggles droits
         self.combo_lang = ctk.CTkComboBox(self.ctrl_frame, values=["fr", "en", "es", "de", "it", "pt"], width=55, height=24, command=self.change_language)
         self.combo_lang.set("fr")
         self.combo_lang.pack(side="right", padx=(5, 0))
@@ -159,19 +158,14 @@ class DeluxeLyricsApp(ctk.CTk):
         self.switch_sync.pack(side="right", padx=(10, 0))
         self.switch_sync.deselect()
 
-        # Offset Controls
         self.offset_frame = ctk.CTkFrame(self.ctrl_frame, fg_color="transparent")
-        
         btn_minus = ctk.CTkButton(self.offset_frame, text="-", width=20, height=20, command=lambda: self.change_offset(-0.5))
         btn_minus.pack(side="left")
-        
         self.lbl_offset = ctk.CTkLabel(self.offset_frame, text=" 0.0s ", font=ctk.CTkFont(size=11))
         self.lbl_offset.pack(side="left", padx=2)
-        
         btn_plus = ctk.CTkButton(self.offset_frame, text="+", width=20, height=20, command=lambda: self.change_offset(0.5))
         btn_plus.pack(side="left")
 
-        # --- Zone des paroles ---
         self.scroll_frame = ctk.CTkScrollableFrame(self, fg_color="transparent", corner_radius=0)
         self.scroll_frame.pack(fill="both", expand=True, padx=10, pady=(0, 20))
 
@@ -198,13 +192,11 @@ class DeluxeLyricsApp(ctk.CTk):
 
     def change_language(self, new_lang):
         self.target_lang = new_lang
-        self.translator = GoogleTranslator(source="auto", target=new_lang)
         for i in range(len(self.lyrics_data)):
             sec, orig, _ = self.lyrics_data[i]
             self.lyrics_data[i] = (sec, orig, "")
-            if i < len(self.line_widgets):
-                if self.line_widgets[i]["trad_lbl"]:
-                    self.line_widgets[i]["trad_lbl"].configure(text="")
+            if i < len(self.line_widgets) and self.line_widgets[i]["trad_lbl"]:
+                self.line_widgets[i]["trad_lbl"].configure(text="")
         
         orig_lines = [item[1] for item in self.lyrics_data]
         threading.Thread(target=self._background_translation, args=(orig_lines, self.current_title, self.current_artist, new_lang), daemon=True).start()
@@ -212,19 +204,18 @@ class DeluxeLyricsApp(ctk.CTk):
     def toggle_translation(self):
         show = self.switch_trad.get() == 1
         for item in self.line_widgets:
-            if item["trad_lbl"] and item["trad_lbl"].cget("text").strip() not in ["", "↳"]:
+            if item["trad_lbl"] and item["trad_lbl"].cget("text").strip() not in ["", "↳", "↳ (Traduction indisponible)"]:
                 if show: item["trad_lbl"].pack(fill="x", anchor="w", pady=(2, 0))
                 else: item["trad_lbl"].pack_forget()
 
     def toggle_sync_mode(self):
         if self.switch_sync.get() == 0:
-            self.offset_frame.pack_forget() # Cache les boutons d'offset
+            self.offset_frame.pack_forget()
             for item in self.line_widgets:
                 item["orig_lbl"].configure(text_color=TEXT_ACTIVE, font=ctk.CTkFont(size=18, weight="normal"))
                 if item["trad_lbl"]: item["trad_lbl"].configure(text_color=TRAD_ACTIVE)
         else:
-            if self.is_synced:
-                self.offset_frame.pack(side="right", padx=(10, 10))
+            if self.is_synced: self.offset_frame.pack(side="right", padx=(10, 10))
             self.active_index = -1
             for item in self.line_widgets:
                 item["orig_lbl"].configure(text_color=TEXT_INACTIVE, font=ctk.CTkFont(size=20, weight="bold"))
@@ -313,47 +304,41 @@ class DeluxeLyricsApp(ctk.CTk):
                             self.after(0, lambda l=lbl: l.pack(fill="x", anchor="w", pady=(2, 0)))
             return
 
-        self.after(0, lambda: self.lbl_status.configure(text="Traduction en cours..."))
-        chunks = []
-        current_chunk = []
-        current_length = 0
-        
-        for line in orig_lines:
-            if current_length + len(line) > 2000:
-                chunks.append("\n".join(current_chunk))
-                current_chunk = [line]
-                current_length = len(line)
-            else:
-                current_chunk.append(line)
-                current_length += len(line) + 1
-        if current_chunk: chunks.append("\n".join(current_chunk))
-
-        translated_lines = []
-        for chunk in chunks:
-            if self.current_title != song_title or self.target_lang != lang: return
-            try:
-                tr_chunk = self.translator.translate(chunk)
-                if tr_chunk: translated_lines.extend(tr_chunk.split("\n"))
-                else: translated_lines.extend([""] * len(chunk.split("\n")))
-            except Exception:
-                translated_lines.extend([""] * len(chunk.split("\n")))
-            time.sleep(1) 
-
+        self.after(0, lambda: self.lbl_status.configure(text="Traduction en cascade..."))
         translated_for_cache = []
-        for i, orig_line in enumerate(orig_lines):
+        
+        for i, line in enumerate(orig_lines):
             if self.current_title != song_title or self.target_lang != lang: return
-            tr = translated_lines[i].strip() if i < len(translated_lines) else ""
-            if "Error 500" in tr or "Server Error" in tr: tr = ""
+            
+            tr = ""
+            line_clean = line.strip()
+            
+            if line_clean:
+                # On utilise Bing au lieu de Google
+                for attempt in range(3):
+                    try:
+                        tr = ts.translate_text(line_clean, translator='bing', from_language='auto', to_language=lang)
+                        if tr: break
+                    except Exception:
+                        pass
+                    time.sleep(1 + attempt) 
+            
+            if line_clean and not tr:
+                tr = "(Traduction indisponible)"
                 
             translated_for_cache.append(tr)
+
             if i < len(self.lyrics_data):
                 sec, orig, _ = self.lyrics_data[i]
                 self.lyrics_data[i] = (sec, orig, tr)
+                
                 if i < len(self.line_widgets) and tr:
                     lbl = self.line_widgets[i]["trad_lbl"]
                     self.after(0, lambda l=lbl, t=tr: l.configure(text=f"↳ {t}"))
                     if self.switch_trad.get() == 1:
                         self.after(0, lambda l=lbl: l.pack(fill="x", anchor="w", pady=(2, 0)))
+            
+            time.sleep(0.5)
 
         if self.current_title == song_title and self.target_lang == lang:
             self.cache[cache_key] = translated_for_cache
@@ -368,7 +353,6 @@ class DeluxeLyricsApp(ctk.CTk):
         synced, plain = None, None
         source = ""
         
-        # 1. Lrclib (Priorité pour la synchro)
         try:
             r = requests.get("https://lrclib.net/api/get", params={"track_name": t, "artist_name": a}, timeout=5)
             if r.status_code == 200:
@@ -376,7 +360,6 @@ class DeluxeLyricsApp(ctk.CTk):
                 source = "Lrclib"
         except: pass
 
-        # 2. Fallback sur Genius si rien trouvé
         if not synced and not plain:
             self.after(0, lambda: self.lbl_status.configure(text="Recherche Genius..."))
             plain = fetch_genius_lyrics(t, a)
@@ -419,7 +402,6 @@ class DeluxeLyricsApp(ctk.CTk):
             t_winrt, a_winrt, pos_sec, app_name = loop.run_until_complete(self._query_winrt())
 
             if t_winrt and t_winrt != self.winrt_title_ref:
-                # Changement physique de musique : on annule l'override manuel
                 self.winrt_title_ref = t_winrt
                 self.manual_override = False
                 self.sync_offset = 0.0
@@ -430,17 +412,13 @@ class DeluxeLyricsApp(ctk.CTk):
             else:
                 t, a = self.current_title, self.current_artist
 
-            # Nouveau morceau ou override activé
             if t and (t != self.current_title or a != self.current_artist or not self.lyrics_data):
                 self.current_title = t
                 self.current_artist = a
                 self._trigger_fetch(t, a)
 
-            # Maj du scroll
             if self.is_synced and pos_sec is not None and self.lyrics_data and self.switch_sync.get() == 1:
-                # Ajout de l'offset modifiable
                 adjusted_pos = pos_sec + self.sync_offset
-                
                 target_idx = -1
                 for idx, (sec, _, _) in enumerate(self.lyrics_data):
                     if adjusted_pos >= sec: target_idx = idx
@@ -474,9 +452,17 @@ class DeluxeLyricsApp(ctk.CTk):
             app_id = session.source_app_user_model_id or "Inconnue"
             app_name = app_id.split("!")[-1].split(".exe")[0].capitalize()
 
-            return clean_meta(props.title), clean_meta(props.artist), pos, app_name
+            raw_title = props.title
+            raw_artist = props.artist
+
+            if " - " in raw_title:
+                parts = raw_title.split(" - ", 1)
+                raw_artist = parts[0]
+                raw_title = parts[1]
+
+            return clean_meta(raw_title), clean_meta(raw_artist), pos, app_name
         except: return None, None, None, "Erreur"
 
 if __name__ == "__main__":
-    app = DeluxeLyricsApp()
+    app = UltimateLyricsApp()
     app.mainloop()
