@@ -8,6 +8,7 @@ import os
 import customtkinter as ctk
 from bs4 import BeautifulSoup
 import translators as ts
+from datetime import datetime, timezone
 
 from winrt.windows.media.control import (
     GlobalSystemMediaTransportControlsSessionManager as MediaManager,
@@ -139,6 +140,11 @@ class UltimateLyricsApp(ctk.CTk):
 
         self.lbl_artist = ctk.CTkLabel(self.header_frame, text="Lancez une musique...", font=ctk.CTkFont(family="Segoe UI", size=16), text_color="#a1a1aa", anchor="w")
         self.lbl_artist.pack(fill="x")
+        
+        # Barre de progression
+        self.progress_bar = ctk.CTkProgressBar(self.header_frame, height=4, progress_color="#3B8ED0", fg_color="#27272a")
+        self.progress_bar.pack(fill="x", pady=(8, 0))
+        self.progress_bar.set(0)
 
         self.ctrl_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.ctrl_frame.pack(fill="x", padx=25, pady=(0, 15))
@@ -314,7 +320,6 @@ class UltimateLyricsApp(ctk.CTk):
             line_clean = line.strip()
             
             if line_clean:
-                # On utilise Bing au lieu de Google
                 for attempt in range(3):
                     try:
                         tr = ts.translate_text(line_clean, translator='bing', from_language='auto', to_language=lang)
@@ -349,6 +354,7 @@ class UltimateLyricsApp(ctk.CTk):
         self.after(0, lambda: self.lbl_title.configure(text=t))
         self.after(0, lambda: self.lbl_artist.configure(text=a))
         self.after(0, lambda: self.lbl_status.configure(text="Recherche Lrclib..."))
+        self.after(0, lambda: self.progress_bar.set(0))
 
         synced, plain = None, None
         source = ""
@@ -399,7 +405,7 @@ class UltimateLyricsApp(ctk.CTk):
         asyncio.set_event_loop(loop)
 
         while True:
-            t_winrt, a_winrt, pos_sec, app_name = loop.run_until_complete(self._query_winrt())
+            t_winrt, a_winrt, pos_sec, app_name, duration = loop.run_until_complete(self._query_winrt())
 
             if t_winrt and t_winrt != self.winrt_title_ref:
                 self.winrt_title_ref = t_winrt
@@ -416,8 +422,14 @@ class UltimateLyricsApp(ctk.CTk):
                 self.current_title = t
                 self.current_artist = a
                 self._trigger_fetch(t, a)
+                
+            # Mise à jour de la barre de progression
+            if duration > 0:
+                self.after(0, lambda p=pos_sec/duration: self.progress_bar.set(min(1.0, max(0.0, p))))
+            else:
+                self.after(0, lambda: self.progress_bar.set(0))
 
-            if self.is_synced and pos_sec is not None and self.lyrics_data and self.switch_sync.get() == 1:
+            if self.is_synced and pos_sec > 0 and self.lyrics_data and self.switch_sync.get() == 1:
                 adjusted_pos = pos_sec + self.sync_offset
                 target_idx = -1
                 for idx, (sec, _, _) in enumerate(self.lyrics_data):
@@ -426,7 +438,7 @@ class UltimateLyricsApp(ctk.CTk):
                 if target_idx != -1:
                     self.after(0, self.highlight_line, target_idx)
 
-            time.sleep(0.3)
+            time.sleep(0.15) # Taux de rafraichissement accéléré pour la fluidité
 
     async def _query_winrt(self):
         try:
@@ -441,13 +453,35 @@ class UltimateLyricsApp(ctk.CTk):
                         break
                 if not session and len(sessions) > 0: session = sessions[0]
 
-            if not session: return None, None, None, "Inconnue"
+            if not session: return None, None, 0.0, "Inconnue", 0.0
 
             props = await session.try_get_media_properties_async()
-            if not props or not props.title: return None, None, None, "Inconnue"
+            if not props or not props.title: return None, None, 0.0, "Inconnue", 0.0
 
+            # Extrapolation du timing pour une synchro parfaite
             timeline = session.get_timeline_properties()
-            pos = timeline.position.total_seconds() if timeline and timeline.position else 0.0
+            pos = 0.0
+            duration = 0.0
+            
+            if timeline:
+                if timeline.end_time:
+                    duration = timeline.end_time.total_seconds()
+                if timeline.position:
+                    pos = timeline.position.total_seconds()
+                    
+                    info = session.get_playback_info()
+                    if info and info.playback_status == PlaybackStatus.PLAYING:
+                        try:
+                            # On extrapole le temps exact écoulé depuis la dernière mise à jour de Windows
+                            last_updated = timeline.last_updated_time
+                            if last_updated.tzinfo is None:
+                                last_updated = last_updated.replace(tzinfo=timezone.utc)
+                            now = datetime.now(timezone.utc)
+                            delta = (now - last_updated).total_seconds()
+                            if delta > 0:
+                                pos += delta
+                        except:
+                            pass
             
             app_id = session.source_app_user_model_id or "Inconnue"
             app_name = app_id.split("!")[-1].split(".exe")[0].capitalize()
@@ -460,8 +494,8 @@ class UltimateLyricsApp(ctk.CTk):
                 raw_artist = parts[0]
                 raw_title = parts[1]
 
-            return clean_meta(raw_title), clean_meta(raw_artist), pos, app_name
-        except: return None, None, None, "Erreur"
+            return clean_meta(raw_title), clean_meta(raw_artist), pos, app_name, duration
+        except: return None, None, 0.0, "Erreur", 0.0
 
 if __name__ == "__main__":
     app = UltimateLyricsApp()
